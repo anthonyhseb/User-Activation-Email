@@ -2,7 +2,7 @@
 
 /**
  *	Plugin Name: User Activation Email
- *	Plugin URI: https://github.com/NateJacobs/User-Activation-Email
+ *	Plugin URI: https://github.com/anthonyhseb/User-Activation-Email
  *	Description: Add an activation code to the new user email sent once a user registers. The user must enter this activation code in addition to a username and password to log in successfully the first time.
  *	Version: 1.3.0
  *	License: GPL V2
@@ -19,7 +19,7 @@ class UserActivationEmail
 	{
 		// since 0.1
 		add_filter( 'authenticate', array( $this, 'check_user_activation_code' ), 11, 3 );
-		add_action( 'login_form', array( $this, 'add_login_field' ) );
+		add_filter( 'login_form_middle', array( $this, 'add_login_field'), 11, 2 );
 		add_action( 'user_register', array( $this, 'add_activation_code' ) );
 		add_action( 'wp_login', array( $this, 'update_activation_code' ) );
 		
@@ -118,6 +118,7 @@ class UserActivationEmail
 		}
 		
 		$user_info = get_user_by( 'login', $user_login );
+		if (empty($user_info)) $user_info = get_user_by_email($user_login);
 		
 		// if the object is empty, meaning an invalid username
 		if( empty( $user_info ) )
@@ -126,7 +127,8 @@ class UserActivationEmail
 			$error->add( 'incorrect user', __( 'Username does not exist', 'user-activation-email' ) );
 			
 			// remove the ability to authenticate
-			remove_action( 'authenticate', 'wp_authenticate_username_password', 20 );
+			remove_filter( 'authenticate', 'wp_authenticate_username_password', 20 );
+			remove_filter( 'authenticate', 'wp_authenticate_email_password', 20 );
 			
 			// return appropriate error
 			return $error;
@@ -150,6 +152,9 @@ class UserActivationEmail
 				$user = new WP_Error( 'access_denied', __( 'Sorry, that activation code does not match. Please try again. You can find the activation code in your welcome email.', 'user-activation-email' ) );
 				// deny access to login and send back to login page
 				remove_filter( 'authenticate', 'wp_authenticate_username_password', 20 );
+				remove_filter( 'authenticate', 'wp_authenticate_email_password', 20 );
+				
+				do_action('uae_activation_code_mismatch', $user_login, $errors);
 				
 				return $user;
 			}
@@ -171,6 +176,7 @@ class UserActivationEmail
 	{
 		// get user data by login
 		$user = get_user_by( 'login', $user_login );
+		if (empty($user_info)) $user_info = get_user_by_email($user_login);
 		// change the custom user meta to show the user has already activated
 		update_user_meta( $user->ID, $this->user_meta, 'active' );
 	}
@@ -183,8 +189,9 @@ class UserActivationEmail
 	 *	@author		Nate Jacobs
 	 *	@since		0.1
 	 */
-	public function add_login_field()
+	public function add_login_field($markup='', $args = array())
 	{
+		ob_start();
 		?>
 		<p>
 			<label for="activation-code"><?php echo __( 'Activation Code (New User Only)', 'user-activation-email' ); ?><br>
@@ -192,6 +199,10 @@ class UserActivationEmail
 			</label>
 		</p>
 		<?php
+		$field_markup = ob_get_contents();
+		ob_end_clean();
+		$field_markup = apply_filters("uae_login_field", $field_markup);
+		return $field_markup;
 	}
 	
 	/** 
@@ -363,6 +374,8 @@ class UserActivationEmail
 }
 new UserActivationEmail();
 
+$uae_notification_email_sent = false;
+
 if ( !function_exists('wp_new_user_notification') ) :
 	
 	/** 
@@ -380,8 +393,12 @@ if ( !function_exists('wp_new_user_notification') ) :
 	 */
 	function wp_new_user_notification( $user_id, $plaintext_pass = '' )
 	{
+		global $uae_notification_email_sent;
+		
 		// pre-notification setup
 		do_action('uae_start_new_user_notifcation');
+		
+		if ($uae_notification_email_sent) return;
 
 		$user = new WP_User($user_id);
 		$activation_code = get_user_meta( $user->ID, 'uae_user_activation_code', true );
@@ -404,14 +421,15 @@ if ( !function_exists('wp_new_user_notification') ) :
 			@wp_mail($admin_email, $subject, $message); 
 		}
  
-		if(empty($plaintext_pass)) {
-			return;
-		}
         
      	$message  = sprintf(__('Username: %s', 'user-activation-email'), $user_login) . "\r\n"; 
-     	$message .= sprintf(__('Password: %s', 'user-activation-email'), $plaintext_pass) . "\r\n\n";
+		if(!empty($plaintext_pass)) {
+	     	$message .= sprintf(__('Password: %s', 'user-activation-email'), $plaintext_pass) . "\r\n\n";
+		}
      	$message .= sprintf(__('Activation Code: %s', 'user-activation-email'), $activation_code) . "\r\n\n"; 
-     	$message .= wp_login_url().'?uae-key='.urlencode( $activation_code )."\r\n"; 
+     	$activation_url = wp_login_url().'?uae-key='.urlencode( $activation_code );
+     	$activation_url = apply_filters("uae_activation_url", $activation_url, $activation_code);
+		$message .= $activation_url."\r\n";
 
 		$message = apply_filters('uae_user_message', $message, $user_login, $user_email, $plaintext_pass, $activation_code);
 		
@@ -421,7 +439,7 @@ if ( !function_exists('wp_new_user_notification') ) :
 
 		// post-notification teardown
 		do_action('uae_end_new_user_notifcation');
-
+		$uae_notification_email_sent = true;
 	}
 endif;
 
